@@ -150,20 +150,35 @@ class QdrantStore:
             for chunk in embedded_chunks
         ]
 
-        result = self.client.upsert(
-            collection_name=self.collection_name,
-            points=points,
-            wait=True,  # block until the operation is confirmed
-        )
+        import time
+        max_retries = 3
+        retry_delay = 5
 
-        if result.status != UpdateStatus.COMPLETED:
-            logger.error(
-                f"Qdrant upsert returned unexpected status: {result.status}"
-            )
-        else:
-            logger.debug(
-                f"Upserted {len(points)} points into '{self.collection_name}'."
-            )
+        for attempt in range(max_retries):
+            try:
+                result = self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=points,
+                    wait=True,  # block until the operation is confirmed
+                )
+
+                if result.status != UpdateStatus.COMPLETED:
+                    logger.error(
+                        f"Qdrant upsert returned unexpected status: {result.status}"
+                    )
+                else:
+                    logger.debug(
+                        f"Upserted {len(points)} points into '{self.collection_name}'."
+                    )
+                return  # Success
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Upsert failed (attempt {attempt+1}/{max_retries}): {e}. Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error(f"Upsert failed after {max_retries} attempts: {e}")
+                    raise
 
     # ------------------------------------------------------------------
     # Info helpers

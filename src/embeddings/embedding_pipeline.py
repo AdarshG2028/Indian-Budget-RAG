@@ -50,12 +50,38 @@ class EmbeddingPipeline:
         self.embedder = embedder
         self.processor = ChunkBatchProcessor(data_dir=data_dir, batch_size=batch_size)
         self.vector_store = vector_store
+        
+        self.state_file = Path(data_dir) / "processed_ids.json"
+        self.processed_ids = self._load_state()
 
         if self.vector_store is None:
             logger.warning(
                 "No QdrantStore provided – pipeline will run in DRY-RUN mode "
                 "(embeddings will not be saved)."
             )
+
+    def _load_state(self) -> set:
+        """Loads the set of already processed deterministic UUIDs."""
+        if self.state_file.exists():
+            try:
+                import json
+                with open(self.state_file, "r") as f:
+                    data = json.load(f)
+                    logger.info(f"Loaded {len(data)} processed IDs from {self.state_file.name}")
+                    return set(data)
+            except Exception as e:
+                logger.warning(f"Could not load state file: {e}")
+        return set()
+
+    def _save_state(self, new_ids: List[str]):
+        """Appends newly processed UUIDs to the state file."""
+        self.processed_ids.update(new_ids)
+        try:
+            import json
+            with open(self.state_file, "w") as f:
+                json.dump(list(self.processed_ids), f)
+        except Exception as e:
+            logger.warning(f"Could not save state file: {e}")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -113,22 +139,34 @@ class EmbeddingPipeline:
             batch_start = time.time()
             total_batches += 1
 
-            # 1. Format texts for embedding
-            texts_to_embed = [format_text_for_embedding(chunk) for chunk in batch]
+            # 1. Filter out chunks we've already processed
+            pending_chunks = []
+            for chunk in batch:
+                chunk_id = generate_deterministic_uuid(chunk.chunk_id, chunk.text)
+                if chunk_id not in self.processed_ids:
+                    pending_chunks.append((chunk, chunk_id))
+            
+            if not pending_chunks:
+                logger.debug(f"Batch {total_batches}: all {len(batch)} chunks already processed, skipping.")
+                continue
 
-            # 2. Generate embeddings
+            # Unpack pending chunks
+            chunks_to_process = [c[0] for c in pending_chunks]
+            chunk_ids = [c[1] for c in pending_chunks]
+
+            # 2. Format texts for embedding
+            texts_to_embed = [format_text_for_embedding(chunk) for chunk in chunks_to_process]
+
+            # 3. Generate embeddings
             embeddings = self.embedder.embed_documents(texts_to_embed)
 
-            # 3. Build EmbeddedChunk objects
+            # 4. Build EmbeddedChunk objects
             embedded_chunks: List[EmbeddedChunk] = []
-            for chunk, embedding in zip(batch, embeddings):
-                deterministic_id = generate_deterministic_uuid(
-                    chunk.chunk_id, chunk.text
-                )
+            for chunk, chunk_id, embedding in zip(chunks_to_process, chunk_ids, embeddings):
                 payload = self._create_payload(chunk)
                 embedded_chunks.append(
                     EmbeddedChunk(
-                        id=deterministic_id,
+                        id=chunk_id,
                         embedding=embedding,
                         payload=payload,
                     )
@@ -136,8 +174,11 @@ class EmbeddingPipeline:
 
             total_chunks_processed += len(embedded_chunks)
 
-            # 4. Persist to Qdrant
+            # 5. Persist to Qdrant
             self._save_to_vector_db(embedded_chunks)
+            
+            # 6. Save state locally
+            self._save_state(chunk_ids)
 
             batch_time = time.time() - batch_start
             logger.debug(
