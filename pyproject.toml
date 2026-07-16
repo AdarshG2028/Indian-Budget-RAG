@@ -18,6 +18,13 @@ dependencies = [
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "python-multipart>=0.0.6",
+    "opentelemetry-api>=1.22.0",
+    "opentelemetry-sdk>=1.22.0",
+    "opentelemetry-instrumentation-fastapi>=0.43b0",
+    "opentelemetry-instrumentation-httpx>=0.43b0",
+    "opentelemetry-exporter-otlp>=1.22.0",
+    "opentelemetry-semantic-conventions>=0.43b0",
+    "opentelemetry-instrumentation-logging>=0.43b0",
 ]
 
 [dependency-groups]

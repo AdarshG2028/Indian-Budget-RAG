@@ -15,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .middleware import RequestIDMiddleware, LoggingMiddleware, ErrorHandlerMiddleware
 from .routers import health_router, rag_router, retrieval_router, evaluation_router
+from .telemetry import configure_telemetry
+from .telemetry.config import shutdown_telemetry
 
 # Configure logging
 logging.basicConfig(
@@ -36,10 +38,15 @@ async def lifespan(app: FastAPI):
     logger.info(f"API prefix: {settings.api_prefix}")
     logger.info(f"Debug mode: {settings.debug}")
     
+    # Configure OpenTelemetry
+    environment = "development" if settings.debug else "production"
+    configure_telemetry(app=app, environment=environment)
+    
     yield
     
     # Shutdown
     logger.info("Shutting down application")
+    shutdown_telemetry()
 
 
 # Create FastAPI application

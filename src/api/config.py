@@ -1,7 +1,7 @@
 """
 API configuration using Pydantic Settings for environment-based configuration.
 """
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 
@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     
     All settings can be overridden via environment variables.
     """
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="allow"  # Allow extra fields from environment variables
+    )
     
     # Application
     app_name: str = "Indian Budget RAG API"
@@ -74,10 +81,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    # OpenTelemetry
+    otel_exporter_otlp_endpoint: str = "http://localhost:4317"
+    otel_service_name: str = "indian-budget-rag"
+    otel_environment: str = "development"
+    otel_sampling_ratio: float = 1.0
 
 
 # Global settings instance
