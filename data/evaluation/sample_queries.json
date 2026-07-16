@@ -1,0 +1,96 @@
+[
+  {
+    "query_id": "q1",
+    "query_text": "What is the budget allocation for agriculture?",
+    "ground_truth": [
+      {
+        "chunk_id": "budget_001",
+        "relevance": 3
+      },
+      {
+        "chunk_id": "budget_002",
+        "relevance": 2
+      }
+    ],
+    "metadata": {
+      "category": "agriculture",
+      "difficulty": "easy"
+    }
+  },
+  {
+    "query_id": "q2",
+    "query_text": "What are the tax changes in the new budget?",
+    "ground_truth": [
+      {
+        "chunk_id": "budget_010",
+        "relevance": 3
+      },
+      {
+        "chunk_id": "budget_011",
+        "relevance": 3
+      },
+      {
+        "chunk_id": "budget_012",
+        "relevance": 2
+      }
+    ],
+    "metadata": {
+      "category": "tax",
+      "difficulty": "medium"
+    }
+  },
+  {
+    "query_id": "q3",
+    "query_text": "How much is allocated to healthcare?",
+    "ground_truth": [
+      {
+        "chunk_id": "budget_020",
+        "relevance": 3
+      },
+      {
+        "chunk_id": "budget_021",
+        "relevance": 2
+      }
+    ],
+    "metadata": {
+      "category": "healthcare",
+      "difficulty": "easy"
+    }
+  },
+  {
+    "query_id": "q4",
+    "query_text": "What are the infrastructure development plans?",
+    "ground_truth": [
+      {
+        "chunk_id": "budget_030",
+        "relevance": 3
+      },
+      {
+        "chunk_id": "budget_031",
+        "relevance": 2
+      },
+      {
+        "chunk_id": "budget_032",
+        "relevance": 2
+      }
+    ],
+    "metadata": {
+      "category": "infrastructure",
+      "difficulty": "medium"
+    }
+  },
+  {
+    "query_id": "q5",
+    "query_text": "What is the fiscal deficit target?",
+    "ground_truth": [
+      {
+        "chunk_id": "budget_040",
+        "relevance": 3
+      }
+    ],
+    "metadata": {
+      "category": "fiscal",
+      "difficulty": "easy"
+    }
+  }
+]

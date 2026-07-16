@@ -11,6 +11,7 @@ from llm.base_llm import BaseLLM
 from llm.models import LLMConfig, LLMResponse, LLMMetrics
 from llm.context_builder import ContextBuilder, ContextBuilderConfig
 from llm.prompts import PromptTemplateRegistry
+from reranking import BaseReranker, RerankerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,10 @@ class RAGConfig:
     """
     Configuration for RAG pipeline.
     """
-    retrieval_top_k: int = 10
+    retrieval_top_k: int = 20
     retrieval_score_threshold: Optional[float] = None
+    reranker_enabled: bool = False
+    reranker_config: Optional[RerankerConfig] = None
     context_max_tokens: int = 4000
     llm_temperature: float = 0.7
     llm_max_tokens: int = 1024
@@ -40,6 +43,8 @@ class RAGResponse:
     llm_metrics: LLMMetrics
     citations: Optional[Dict[str, Any]] = None
     prompt_construction_time: float = 0.0
+    reranker_used: bool = False
+    reranker_metrics: Optional[Dict[str, Any]] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert response to dictionary for logging/export."""
@@ -49,19 +54,22 @@ class RAGResponse:
             "llm_response": self.llm_response.to_dict(),
             "llm_metrics": self.llm_metrics.to_dict(),
             "citations": self.citations,
-            "prompt_construction_time": self.prompt_construction_time
+            "prompt_construction_time": self.prompt_construction_time,
+            "reranker_used": self.reranker_used,
+            "reranker_metrics": self.reranker_metrics
         }
 
 
 class RAGPipeline:
     """
-    Complete RAG pipeline orchestrating retrieval, context building, and LLM generation.
+    Complete RAG pipeline orchestrating retrieval, reranking, context building, and LLM generation.
     
     Pipeline flow:
-    User Query → Retriever → Context Builder → Prompt Template → LLM → Response with citations
+    User Query → Retriever → [Optional Reranker] → Context Builder → Prompt Template → LLM → Response with citations
     
     Responsibilities:
     - Orchestrate retrieval with configurable parameters
+    - Optional reranking for improved relevance
     - Build formatted context from retrieved chunks
     - Apply appropriate prompt templates
     - Generate responses via LLM
@@ -75,6 +83,7 @@ class RAGPipeline:
         retriever: BaseRetriever,
         llm: BaseLLM,
         context_builder: Optional[ContextBuilder] = None,
+        reranker: Optional[BaseReranker] = None,
         config: Optional[RAGConfig] = None
     ):
         """
@@ -84,10 +93,12 @@ class RAGPipeline:
             retriever: Retrieval component
             llm: LLM component
             context_builder: Optional context builder (creates default if None)
+            reranker: Optional reranker component
             config: RAG pipeline configuration
         """
         self.retriever = retriever
         self.llm = llm
+        self.reranker = reranker
         self.config = config or RAGConfig()
         
         # Create context builder with config
@@ -97,9 +108,11 @@ class RAGPipeline:
         )
         self.context_builder = context_builder or ContextBuilder(context_config)
         
+        reranker_status = "enabled" if self.reranker else "disabled"
         logger.info(
             f"RAGPipeline initialized with template: {self.config.prompt_template}, "
-            f"top_k: {self.config.retrieval_top_k}"
+            f"retrieval_top_k: {self.config.retrieval_top_k}, "
+            f"reranker: {reranker_status}"
         )
     
     def query(self, question: str, stream: bool = False) -> RAGResponse:
@@ -131,25 +144,69 @@ class RAGPipeline:
                 logger.warning("No results retrieved from retriever")
                 return self._handle_empty_retrieval(question, retrieval_context)
             
-            # Step 2: Context building
+            # Step 2: Optional Reranking
+            reranker_used = False
+            reranker_metrics = None
+            final_results = retrieval_context.results
+            
+            if self.reranker and self.config.reranker_enabled:
+                logger.info("Reranking retrieved chunks")
+                rerank_start = time.time()
+                
+                try:
+                    # Convert retrieval results to format expected by reranker
+                    chunks_for_reranking = [
+                        {
+                            "chunk_id": r.chunk_id,
+                            "text": r.text,
+                            "score": r.score,
+                            "document": r.document,
+                            "year": r.year,
+                            "section": r.section,
+                            "subsection": r.subsection,
+                            "page_start": r.page_start,
+                            "page_end": r.page_end
+                        }
+                        for r in retrieval_context.results
+                    ]
+                    
+                    # Perform reranking
+                    reranker_output = self.reranker.rerank(question, chunks_for_reranking)
+                    
+                    # Convert reranked results back to RetrievalResult format
+                    final_results = self._convert_reranker_results(reranker_output.results)
+                    
+                    reranker_used = True
+                    reranker_metrics = self.reranker.get_metrics().to_dict()
+                    
+                    logger.info(
+                        f"Reranking completed in {reranker_output.reranking_latency:.3f}s, "
+                        f"fallback: {reranker_output.fallback_used}"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Reranking failed: {e}, using original results")
+                    reranker_used = False
+            
+            # Step 3: Context building
             logger.info("Building context from retrieved chunks")
             context_start = time.time()
             
             if self.config.include_citations:
                 context, citations = self.context_builder.build_context_with_citations(
-                    retrieval_context.results,
+                    final_results,
                     max_tokens=self.config.context_max_tokens
                 )
             else:
                 context = self.context_builder.build_context(
-                    retrieval_context.results,
+                    final_results,
                     max_tokens=self.config.context_max_tokens
                 )
                 citations = None
             
             context_time = time.time() - context_start
             
-            # Step 3: Prompt construction
+            # Step 4: Prompt construction
             logger.info("Constructing prompt with template")
             prompt_start = time.time()
             
@@ -169,13 +226,13 @@ class RAGPipeline:
             
             prompt_time = time.time() - prompt_start
             
-            # Step 4: LLM generation
+            # Step 5: LLM generation
             logger.info("Generating response via LLM")
             llm_start = time.time()
             llm_response = self.llm.generate(prompt)
             llm_time = time.time() - llm_start
             
-            # Step 5: Build metrics
+            # Step 6: Build metrics
             total_time = time.time() - total_start
             
             llm_metrics = LLMMetrics(
@@ -188,19 +245,26 @@ class RAGPipeline:
                 model=llm_response.model
             )
             
-            # Step 6: Build response
+            # Step 7: Build response
             rag_response = RAGResponse(
                 answer=llm_response.text,
                 retrieval_context=retrieval_context,
                 llm_response=llm_response,
                 llm_metrics=llm_metrics,
                 citations=citations,
-                prompt_construction_time=prompt_time
+                prompt_construction_time=prompt_time,
+                reranker_used=reranker_used,
+                reranker_metrics=reranker_metrics
             )
+            
+            reranking_info = ""
+            if reranker_used and reranker_metrics:
+                reranking_info = f", reranking: {reranker_metrics.get('reranking_latency', 0):.3f}s"
             
             logger.info(
                 f"RAG pipeline completed in {total_time:.3f}s "
-                f"(retrieval: {retrieval_context.metrics.retrieval_latency:.3f}s, "
+                f"(retrieval: {retrieval_context.metrics.retrieval_latency:.3f}s"
+                f"{reranking_info}, "
                 f"context: {context_time:.3f}s, "
                 f"prompt: {prompt_time:.3f}s, "
                 f"llm: {llm_time:.3f}s)"
@@ -211,6 +275,39 @@ class RAGPipeline:
         except Exception as e:
             logger.error(f"RAG pipeline failed: {e}")
             raise
+    
+    def _convert_reranker_results(self, reranker_results) -> list:
+        """
+        Convert reranker results back to RetrievalResult format.
+        
+        Args:
+            reranker_results: List of RerankerResult objects
+            
+        Returns:
+            List of RetrievalResult objects
+        """
+        from retrieval.models import RetrievalResult
+        
+        results = []
+        for rr in reranker_results:
+            result = RetrievalResult(
+                chunk_id=rr.chunk_id,
+                document=rr.metadata.get("document", ""),
+                year=rr.metadata.get("year", 0),
+                section=rr.metadata.get("section", ""),
+                subsection=rr.metadata.get("subsection", ""),
+                paragraph_start=0,
+                paragraph_end=0,
+                page_start=rr.metadata.get("page_start", 0),
+                page_end=rr.metadata.get("page_end", 0),
+                score=rr.reranked_score,
+                rank=rr.reranked_rank,
+                text=rr.text,
+                metadata=rr.metadata
+            )
+            results.append(result)
+        
+        return results
     
     def query_stream(self, question: str) -> Iterator[str]:
         """

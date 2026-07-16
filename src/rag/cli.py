@@ -14,6 +14,7 @@ from embeddings.embedder import BGEEmbedder
 from retrieval import DenseRetriever, QdrantVectorStore, RetrievalConfig
 from llm import GroqLLM, LLMConfig
 from rag import RAGPipeline, RAGConfig
+from reranking import CrossEncoderReranker, RerankerConfig
 from embeddings.config import MODEL_NAME, DEVICE
 
 # Load environment variables
@@ -66,8 +67,8 @@ def main():
     parser.add_argument(
         "--llm-model",
         type=str,
-        default="llama3-8b-8192",
-        help="Groq model name (default: llama3-8b-8192)"
+        default="llama-3.3-70b-versatile",
+        help="Groq model name (default: llama-3.3-70b-versatile)"
     )
     
     parser.add_argument(
@@ -144,6 +145,41 @@ def main():
         help="Embedding dimension (default: 768 for bge-base-en-v1.5)"
     )
     
+    # Reranking arguments
+    parser.add_argument(
+        "--enable-rerank",
+        action="store_true",
+        help="Enable reranking of retrieved chunks"
+    )
+    
+    parser.add_argument(
+        "--reranker-model",
+        type=str,
+        default="ms-marco-MiniLM-L-6-v2",
+        help="Reranker model name (default: ms-marco-MiniLM-L-6-v2)"
+    )
+    
+    parser.add_argument(
+        "--rerank-top-k",
+        type=int,
+        default=20,
+        help="Number of chunks to rerank (default: 20)"
+    )
+    
+    parser.add_argument(
+        "--return-top-k",
+        type=int,
+        default=5,
+        help="Number of chunks to return after reranking (default: 5)"
+    )
+    
+    parser.add_argument(
+        "--reranker-device",
+        type=str,
+        default="cpu",
+        help="Device for reranker (default: cpu)"
+    )
+    
     # Output arguments
     parser.add_argument(
         "--stream",
@@ -213,11 +249,29 @@ def main():
         )
         llm = GroqLLM(llm_config)
         
+        # Initialize reranker if enabled
+        reranker = None
+        if args.enable_rerank:
+            logger.info(f"Initializing reranker with model: {args.reranker_model}")
+            reranker_config = RerankerConfig(
+                model_name=args.reranker_model,
+                device=args.reranker_device,
+                retrieve_top_k=args.top_k,
+                rerank_top_k=args.rerank_top_k,
+                return_top_k=args.return_top_k,
+                normalize_scores=True,
+                enable_fallback=True
+            )
+            reranker = CrossEncoderReranker(reranker_config)
+            logger.info("Reranker initialized successfully")
+        
         # Initialize RAG pipeline
         logger.info("Initializing RAG pipeline...")
         rag_config = RAGConfig(
             retrieval_top_k=args.top_k,
             retrieval_score_threshold=args.score_threshold,
+            reranker_enabled=args.enable_rerank,
+            reranker_config=None,  # Will be set from reranker if needed
             context_max_tokens=args.context_max_tokens,
             llm_temperature=args.llm_temperature,
             llm_max_tokens=args.llm_max_tokens,
@@ -227,6 +281,7 @@ def main():
         pipeline = RAGPipeline(
             retriever=retriever,
             llm=llm,
+            reranker=reranker,
             config=rag_config
         )
         

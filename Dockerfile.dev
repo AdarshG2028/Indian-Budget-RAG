@@ -1,0 +1,32 @@
+# Development Dockerfile for Indian Budget RAG API
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY pyproject.toml uv.lock ./
+
+# Install uv and dependencies (including dev dependencies)
+RUN pip install uv
+RUN uv sync --frozen
+
+# Copy application code
+COPY src/ ./src/
+COPY data/ ./data/
+
+# Create necessary directories
+RUN mkdir -p evaluation/reports evaluation/experiments
+
+# Expose port
+EXPOSE 8000
+
+# Run the application with hot reload
+CMD ["uv", "run", "python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

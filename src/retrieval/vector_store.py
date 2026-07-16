@@ -142,13 +142,24 @@ class QdrantVectorStore(VectorStore):
         qdrant_filter = FilterConverter.to_qdrant_filter(filter_conditions)
         
         # Perform search
-        search_results = self.client.search(
-            collection_name=self.collection_name,
-            query_vector=query_vector,
-            query_filter=qdrant_filter,
-            limit=top_k,
-            score_threshold=score_threshold
-        )
+        try:
+            # Try newer API first
+            search_results = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_vector,
+                query_filter=qdrant_filter,
+                limit=top_k,
+                score_threshold=score_threshold
+            ).points
+        except AttributeError:
+            # Fall back to older API
+            search_results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_vector,
+                query_filter=qdrant_filter,
+                limit=top_k,
+                score_threshold=score_threshold
+            )
         
         # Convert to RetrievalResult objects with ranks
         results = []

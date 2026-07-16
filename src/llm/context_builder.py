@@ -215,16 +215,19 @@ class ContextBuilder:
         """
         parts = []
         
-        # Add marker at start
-        parts.append(f"{marker}")
+        # Add marker at start with document information
+        citation_info = f"{marker} - {result.document} ({result.year})"
+        if result.section:
+            citation_info += f", {result.section}"
+        parts.append(citation_info)
         
-        # Add metadata
+        # Add additional metadata
         if self.config.include_metadata:
             metadata_parts = []
-            if result.section:
-                metadata_parts.append(f"Section: {result.section}")
             if result.subsection:
                 metadata_parts.append(f"Subsection: {result.subsection}")
+            if result.page_start and result.page_end:
+                metadata_parts.append(f"Pages: {result.page_start}-{result.page_end}")
             
             if metadata_parts:
                 parts.append(" | ".join(metadata_parts))
