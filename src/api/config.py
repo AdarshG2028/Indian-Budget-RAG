@@ -30,8 +30,8 @@ class Settings(BaseSettings):
     port: int = 8000
     
     # CORS
-    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8000"]
-    cors_allow_credentials: bool = True
+    cors_origins: list[str] = ["*"]
+    cors_allow_credentials: bool = False
     cors_allow_methods: list[str] = ["*"]
     cors_allow_headers: list[str] = ["*"]
     

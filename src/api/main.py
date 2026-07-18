@@ -78,7 +78,11 @@ app.add_middleware(
 # Add custom middleware (added first = runs closest to the route, so
 # rate-limited 429s still get request IDs and logging)
 if settings.rate_limit_enabled:
-    # Config paths are relative to api_prefix; compose full prefixes here
+    # Config paths are relative to api_prefix; compose full prefixes here.
+    # No api_key_header is passed: this API has no auth layer validating
+    # that header (a React SPA can't hold a secret client-side), so keying
+    # the limiter off a client-supplied header would let anyone bypass the
+    # IP-based limit by sending a fresh value per request.
     app.add_middleware(
         RateLimitMiddleware,
         max_requests=settings.rate_limit_max_requests,
@@ -90,8 +94,7 @@ if settings.rate_limit_enabled:
             f"{settings.api_prefix}{path}": rule
             for path, rule in settings.rate_limit_rules.items()
         },
-        trust_forwarded_for=settings.rate_limit_trust_forwarded_for,
-        api_key_header=settings.api_key_header
+        trust_forwarded_for=settings.rate_limit_trust_forwarded_for
     )
 app.add_middleware(ErrorHandlerMiddleware)
 app.add_middleware(LoggingMiddleware)

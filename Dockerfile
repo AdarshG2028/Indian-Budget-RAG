@@ -27,9 +27,11 @@ RUN mkdir -p evaluation/reports evaluation/experiments
 # Expose port
 EXPOSE 8000
 
-# Health check
+# Health check (stdlib-only: urlopen raises on connection failure or a
+# non-2xx status, which is enough to mark the container unhealthy;
+# 'requests' is not a project dependency and would always ImportError)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/api/v1/health/live')"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/live', timeout=5)"
 
 # Run the application
 CMD ["uv", "run", "python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
