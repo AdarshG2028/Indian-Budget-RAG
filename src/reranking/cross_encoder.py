@@ -11,6 +11,12 @@ from .model_manager import get_global_model_manager
 
 logger = logging.getLogger(__name__)
 
+try:
+    from src.observability import get_telemetry
+except ImportError:
+    from observability import get_telemetry
+telemetry = get_telemetry()
+
 
 class CrossEncoderReranker(BaseReranker):
     """
@@ -60,6 +66,21 @@ class CrossEncoderReranker(BaseReranker):
         """
         start_time = time.time()
         
+        # Start reranker span
+        reranker_span = None
+        if telemetry:
+            reranker_span = telemetry.start_span(
+                "reranker.cross_encoder",
+                attributes={
+                    "reranker.model": self.config.model_name,
+                    "reranker.input_chunks": len(retrieved_chunks),
+                    "reranker.rerank_top_k": self.config.rerank_top_k,
+                    "reranker.return_top_k": self.config.return_top_k,
+                    "reranker.normalize_scores": self.config.normalize_scores
+                }
+            )
+            telemetry.record_event("reranker.started")
+        
         try:
             # Limit to rerank_top_k chunks
             chunks_to_rerank = retrieved_chunks[:self.config.rerank_top_k]
@@ -71,7 +92,9 @@ class CrossEncoderReranker(BaseReranker):
             ]
             
             # Compute cross-encoder scores
+            scoring_start = time.time()
             scores = self.model.predict(pairs)
+            scoring_time = time.time() - scoring_start
             
             # Normalize scores if enabled
             if self.config.normalize_scores:
@@ -93,18 +116,32 @@ class CrossEncoderReranker(BaseReranker):
             results = results[:self.config.return_top_k]
             
             # Update metrics
-            self._update_metrics(results, time.time() - start_time)
+            reranking_latency = time.time() - start_time
+            self._update_metrics(results, reranking_latency)
+            
+            if telemetry:
+                telemetry.set_span_attribute(reranker_span, "reranker.scoring_latency", scoring_time)
+                telemetry.set_span_attribute(reranker_span, "reranker.total_latency", reranking_latency)
+                telemetry.set_span_attribute(reranker_span, "reranker.output_chunks", len(results))
+                telemetry.record_event("reranker.completed", {
+                    "reranker.scoring_latency": scoring_time,
+                    "reranker.total_latency": reranking_latency,
+                    "reranker.output_chunks": len(results)
+                })
             
             return RerankerOutput(
                 results=results,
                 query=query,
-                reranking_latency=time.time() - start_time,
+                reranking_latency=reranking_latency,
                 fallback_used=False,
                 model_name=self.config.model_name
             )
             
         except Exception as e:
             logger.error(f"Reranking failed: {e}")
+            if telemetry:
+                telemetry.record_exception(e, reranker_span)
+                telemetry.record_event("reranker.failed")
             
             if self.config.enable_fallback:
                 logger.warning("Falling back to original results")
@@ -112,6 +149,9 @@ class CrossEncoderReranker(BaseReranker):
                 
                 # Create results from original retrieval
                 results = self._create_fallback_results(retrieved_chunks, query)
+                
+                if telemetry:
+                    telemetry.record_event("reranker.fallback_used")
                 
                 return RerankerOutput(
                     results=results,
@@ -122,6 +162,9 @@ class CrossEncoderReranker(BaseReranker):
                 )
             else:
                 raise
+        finally:
+            if telemetry and reranker_span:
+                telemetry.end_span(reranker_span)
     
     def rerank_batch(
         self,

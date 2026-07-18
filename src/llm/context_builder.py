@@ -9,6 +9,12 @@ from retrieval.models import RetrievalResult
 
 logger = logging.getLogger(__name__)
 
+try:
+    from src.observability import get_telemetry
+except ImportError:
+    from observability import get_telemetry
+telemetry = get_telemetry()
+
 
 @dataclass
 class ContextBuilderConfig:
@@ -58,40 +64,87 @@ class ContextBuilder:
         Returns:
             Formatted context string
         """
-        if not results:
-            logger.warning("No results provided to context builder")
-            return ""
+        # Start context building span
+        context_span = None
+        if telemetry:
+            context_span = telemetry.start_span(
+                "context_builder.build_context",
+                attributes={
+                    "context_builder.input_chunks": len(results),
+                    "context_builder.max_tokens": max_tokens or self.config.max_context_tokens,
+                    "context_builder.include_citations": self.config.include_citations
+                }
+            )
+            telemetry.record_event("context_builder.started")
         
-        max_tokens = max_tokens or self.config.max_context_tokens
-        context_parts = []
-        current_tokens = 0
-        
-        for result in results:
-            # Format individual chunk
-            chunk_text = self._format_chunk(result)
+        try:
+            if not results:
+                logger.warning("No results provided to context builder")
+                if telemetry:
+                    telemetry.record_event("context_builder.no_results")
+                return ""
             
-            # Estimate tokens (rough approximation: 4 chars per token)
-            chunk_tokens = len(chunk_text) // 4
+            max_tokens = max_tokens or self.config.max_context_tokens
+            context_parts = []
+            current_tokens = 0
+            chunks_added = 0
+            chunks_skipped = 0
             
-            # Check if adding this chunk would exceed budget
-            if current_tokens + chunk_tokens > max_tokens:
-                logger.info(
-                    f"Context token limit reached at {current_tokens} tokens, "
-                    f"skipping remaining {len(results) - len(context_parts)} chunks"
-                )
-                break
+            for result in results:
+                # Format individual chunk
+                chunk_text = self._format_chunk(result)
+                
+                # Estimate tokens (rough approximation: 4 chars per token)
+                chunk_tokens = len(chunk_text) // 4
+                
+                # Check if adding this chunk would exceed budget
+                if current_tokens + chunk_tokens > max_tokens:
+                    logger.info(
+                        f"Context token limit reached at {current_tokens} tokens, "
+                        f"skipping remaining {len(results) - len(context_parts)} chunks"
+                    )
+                    chunks_skipped = len(results) - len(context_parts)
+                    if telemetry:
+                        telemetry.record_event("context_builder.token_limit_reached", {
+                            "context_builder.current_tokens": current_tokens,
+                            "context_builder.chunks_skipped": chunks_skipped
+                        })
+                    break
+                
+                context_parts.append(chunk_text)
+                current_tokens += chunk_tokens
+                chunks_added += 1
             
-            context_parts.append(chunk_text)
-            current_tokens += chunk_tokens
-        
-        context = self.config.chunk_separator.join(context_parts)
-        
-        logger.info(
-            f"Built context with {len(context_parts)} chunks, "
-            f"estimated {current_tokens} tokens"
-        )
-        
-        return context
+            context = self.config.chunk_separator.join(context_parts)
+            
+            logger.info(
+                f"Built context with {len(context_parts)} chunks, "
+                f"estimated {current_tokens} tokens"
+            )
+            
+            if telemetry:
+                telemetry.set_span_attribute(context_span, "context_builder.chunks_added", chunks_added)
+                telemetry.set_span_attribute(context_span, "context_builder.chunks_skipped", chunks_skipped)
+                telemetry.set_span_attribute(context_span, "context_builder.final_tokens", current_tokens)
+                telemetry.set_span_attribute(context_span, "context_builder.context_length", len(context))
+                telemetry.record_event("context_builder.completed", {
+                    "context_builder.chunks_added": chunks_added,
+                    "context_builder.chunks_skipped": chunks_skipped,
+                    "context_builder.final_tokens": current_tokens,
+                    "context_builder.context_length": len(context)
+                })
+            
+            return context
+            
+        except Exception as e:
+            logger.error(f"Context building failed: {e}")
+            if telemetry:
+                telemetry.record_exception(e, context_span)
+                telemetry.record_event("context_builder.failed")
+            raise
+        finally:
+            if telemetry and context_span:
+                telemetry.end_span(context_span)
     
     def _format_chunk(self, result: RetrievalResult) -> str:
         """

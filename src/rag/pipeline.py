@@ -13,7 +13,15 @@ from llm.context_builder import ContextBuilder, ContextBuilderConfig
 from llm.prompts import PromptTemplateRegistry
 from reranking import BaseReranker, RerankerConfig
 
+from .query_classification import requires_expenditure_sources, is_narrative_document
+
 logger = logging.getLogger(__name__)
+
+try:
+    from src.observability import get_telemetry
+except ImportError:
+    from observability import get_telemetry
+telemetry = get_telemetry()
 
 
 @dataclass
@@ -131,6 +139,21 @@ class RAGPipeline:
         
         total_start = time.time()
         
+        # Start RAG Pipeline span
+        rag_span = None
+        if telemetry:
+            rag_span = telemetry.start_span(
+                "rag.pipeline",
+                attributes={
+                    "rag.question_length": len(question),
+                    "rag.template": self.config.prompt_template,
+                    "rag.retrieval_top_k": self.config.retrieval_top_k,
+                    "rag.reranker_enabled": self.config.reranker_enabled,
+                    "rag.context_max_tokens": self.config.context_max_tokens
+                }
+            )
+            telemetry.record_event("rag.pipeline.started")
+        
         try:
             # Step 1: Retrieval
             logger.info(f"Starting retrieval for question: '{question}'")
@@ -142,6 +165,8 @@ class RAGPipeline:
             
             if not retrieval_context.results:
                 logger.warning("No results retrieved from retriever")
+                if telemetry:
+                    telemetry.record_event("rag.pipeline.no_results")
                 return self._handle_empty_retrieval(question, retrieval_context)
             
             # Step 2: Optional Reranking
@@ -149,12 +174,20 @@ class RAGPipeline:
             reranker_metrics = None
             final_results = retrieval_context.results
             
+            # Post-retrieval document type diversity filter
+            # If question asks for detailed allocations, prioritize non-narrative results
+            prioritize_tabular = requires_expenditure_sources(question)
+            if prioritize_tabular:
+                final_results = self._prioritize_tabular_sources(final_results)
+            
             if self.reranker and self.config.reranker_enabled:
                 logger.info("Reranking retrieved chunks")
-                rerank_start = time.time()
-                
+                # The reranker instruments its own span (reranker.cross_encoder);
+                # no pipeline-level span here to avoid duplicate telemetry.
                 try:
-                    # Convert retrieval results to format expected by reranker
+                    # Rerank the post-filter ordering, not the raw retrieval
+                    # output, so the document-type prioritization above is
+                    # preserved as the reranker's candidate pool.
                     chunks_for_reranking = [
                         {
                             "chunk_id": r.chunk_id,
@@ -167,70 +200,146 @@ class RAGPipeline:
                             "page_start": r.page_start,
                             "page_end": r.page_end
                         }
-                        for r in retrieval_context.results
+                        for r in final_results
                     ]
-                    
-                    # Perform reranking
+
                     reranker_output = self.reranker.rerank(question, chunks_for_reranking)
-                    
+
                     # Convert reranked results back to RetrievalResult format
                     final_results = self._convert_reranker_results(reranker_output.results)
-                    
+
+                    # The cross-encoder re-sorts purely by its own relevance
+                    # score, which can put narrative chunks back on top; the
+                    # document-type prioritization must survive reranking.
+                    if prioritize_tabular:
+                        final_results = self._prioritize_tabular_sources(final_results)
+
                     reranker_used = True
                     reranker_metrics = self.reranker.get_metrics().to_dict()
-                    
+
                     logger.info(
                         f"Reranking completed in {reranker_output.reranking_latency:.3f}s, "
                         f"fallback: {reranker_output.fallback_used}"
                     )
-                    
+
+                    if telemetry:
+                        telemetry.record_event("rag.reranker.completed", {
+                            "reranker.latency": reranker_output.reranking_latency,
+                            "reranker.fallback_used": reranker_output.fallback_used,
+                            "reranker.output_chunks": len(final_results)
+                        })
+
                 except Exception as e:
                     logger.error(f"Reranking failed: {e}, using original results")
                     reranker_used = False
+                    if telemetry:
+                        telemetry.record_exception(e)
+                        telemetry.record_event("rag.reranker.failed")
             
             # Step 3: Context building
+            # ContextBuilder instruments its own span; no duplicate span here.
             logger.info("Building context from retrieved chunks")
             context_start = time.time()
-            
-            if self.config.include_citations:
-                context, citations = self.context_builder.build_context_with_citations(
-                    final_results,
-                    max_tokens=self.config.context_max_tokens
-                )
-            else:
-                context = self.context_builder.build_context(
-                    final_results,
-                    max_tokens=self.config.context_max_tokens
-                )
-                citations = None
-            
+
+            try:
+                if self.config.include_citations:
+                    context, citations = self.context_builder.build_context_with_citations(
+                        final_results,
+                        max_tokens=self.config.context_max_tokens
+                    )
+                else:
+                    context = self.context_builder.build_context(
+                        final_results,
+                        max_tokens=self.config.context_max_tokens
+                    )
+                    citations = None
+            except Exception as e:
+                logger.error(f"Context building failed: {e}")
+                if telemetry:
+                    telemetry.record_exception(e)
+                    telemetry.record_event("rag.context_builder.failed")
+                raise
+
             context_time = time.time() - context_start
+            if telemetry:
+                telemetry.record_event("rag.context_builder.completed", {
+                    "context_builder.latency": context_time,
+                    "context_builder.citations_count": len(citations) if citations else 0
+                })
             
             # Step 4: Prompt construction
             logger.info("Constructing prompt with template")
             prompt_start = time.time()
             
-            template = PromptTemplateRegistry.get_template(self.config.prompt_template)
+            # Start Prompt Construction span
+            prompt_span = None
+            if telemetry:
+                prompt_span = telemetry.start_span(
+                    "rag.prompt_construction",
+                    attributes={
+                        "prompt.template": self.config.prompt_template,
+                        "prompt.context_length": len(context)
+                    }
+                )
+                telemetry.record_event("rag.prompt_construction.started")
             
-            if self.config.prompt_template == "qa":
-                prompt = template.format(question=question, context=context)
-            elif self.config.prompt_template == "summarization":
-                prompt = template.format(context=context)
-            elif self.config.prompt_template == "comparison":
-                # For comparison, we'd need two contexts - not implemented yet
-                raise NotImplementedError("Comparison template requires two contexts")
-            elif self.config.prompt_template == "analysis":
-                prompt = template.format(question=question, context=context)
-            else:
-                prompt = template.format(question=question, context=context)
-            
-            prompt_time = time.time() - prompt_start
+            try:
+                template = PromptTemplateRegistry.get_template(self.config.prompt_template)
+
+                if self.config.prompt_template == "qa":
+                    prompt = template.format(question=question, context=context)
+                elif self.config.prompt_template == "summarization":
+                    prompt = template.format(context=context)
+                elif self.config.prompt_template == "comparison":
+                    # For comparison, we'd need two contexts - not implemented yet
+                    raise NotImplementedError("Comparison template requires two contexts")
+                elif self.config.prompt_template == "analysis":
+                    prompt = template.format(question=question, context=context)
+                else:
+                    prompt = template.format(question=question, context=context)
+            except Exception as e:
+                logger.error(f"Prompt construction failed: {e}")
+                if telemetry:
+                    telemetry.record_exception(e, prompt_span)
+                    telemetry.record_event("rag.prompt_construction.failed")
+                raise
+            finally:
+                # `prompt` is unbound if the try block raised; only the
+                # latency attribute is safe to record unconditionally.
+                prompt_time = time.time() - prompt_start
+                if telemetry and prompt_span:
+                    telemetry.set_span_attribute(prompt_span, "prompt.latency", prompt_time)
+                    telemetry.end_span(prompt_span)
+
+            if telemetry:
+                telemetry.record_event("rag.prompt_construction.completed", {
+                    "prompt.latency": prompt_time,
+                    "prompt.length": len(prompt)
+                })
             
             # Step 5: LLM generation
+            # GroqLLM instruments its own span (llm.groq_api_call); no
+            # duplicate pipeline-level span here.
             logger.info("Generating response via LLM")
             llm_start = time.time()
-            llm_response = self.llm.generate(prompt)
+
+            try:
+                llm_response = self.llm.generate(prompt)
+            except Exception as e:
+                logger.error(f"LLM generation failed: {e}")
+                if telemetry:
+                    telemetry.record_exception(e)
+                    telemetry.record_event("rag.llm_generation.failed")
+                raise
+
             llm_time = time.time() - llm_start
+            if telemetry:
+                telemetry.record_event("rag.llm_generation.completed", {
+                    "llm.latency": llm_time,
+                    "llm.prompt_tokens": llm_response.prompt_tokens,
+                    "llm.completion_tokens": llm_response.completion_tokens,
+                    "llm.total_tokens": llm_response.total_tokens
+                })
             
             # Step 6: Build metrics
             total_time = time.time() - total_start
@@ -270,12 +379,53 @@ class RAGPipeline:
                 f"llm: {llm_time:.3f}s)"
             )
             
+            if telemetry:
+                telemetry.record_event("rag.pipeline.completed", {
+                    "rag.total_latency": total_time,
+                    "rag.retrieval_latency": retrieval_context.metrics.retrieval_latency,
+                    "rag.context_latency": context_time,
+                    "rag.prompt_latency": prompt_time,
+                    "rag.llm_latency": llm_time
+                })
+            
             return rag_response
             
         except Exception as e:
             logger.error(f"RAG pipeline failed: {e}")
+            if telemetry:
+                telemetry.record_exception(e, rag_span)
+                telemetry.record_event("rag.pipeline.failed")
             raise
+        finally:
+            if telemetry and rag_span:
+                telemetry.end_span(rag_span)
     
+    def _prioritize_tabular_sources(self, results: list) -> list:
+        """
+        Reorder results so tabular (non-narrative) documents come first.
+
+        Narrative chunks are kept as fallback so a sparse tabular match never
+        turns a valid retrieval into an empty context. Ranks are recomputed to
+        match the new ordering because citations render from result.rank.
+        """
+        tabular = [r for r in results if not is_narrative_document(r.document)]
+        narrative = [r for r in results if is_narrative_document(r.document)]
+
+        if not tabular:
+            logger.warning("No non-narrative results found; retaining original results")
+            return results
+
+        fallback_count = max(0, self.config.retrieval_top_k - len(tabular))
+        prioritized = (tabular + narrative[:fallback_count])[:self.config.retrieval_top_k]
+        for new_rank, result in enumerate(prioritized, 1):
+            result.rank = new_rank
+
+        logger.info(
+            "Detailed allocation sources: %s tabular + %s fallback narrative chunks",
+            len(tabular), len(prioritized) - len(tabular),
+        )
+        return prioritized
+
     def _convert_reranker_results(self, reranker_results) -> list:
         """
         Convert reranker results back to RetrievalResult format.
@@ -331,17 +481,22 @@ class RAGPipeline:
             logger.warning("No results retrieved from retriever")
             yield "No relevant information found in the budget documents."
             return
-        
+
+        # Same document-type prioritization as the non-streaming path
+        final_results = retrieval_context.results
+        if requires_expenditure_sources(question):
+            final_results = self._prioritize_tabular_sources(final_results)
+
         # Step 2: Context building
         logger.info("Building context from retrieved chunks")
         if self.config.include_citations:
             context, citations = self.context_builder.build_context_with_citations(
-                retrieval_context.results,
+                final_results,
                 max_tokens=self.config.context_max_tokens
             )
         else:
             context = self.context_builder.build_context(
-                retrieval_context.results,
+                final_results,
                 max_tokens=self.config.context_max_tokens
             )
             citations = None

@@ -54,6 +54,22 @@ class EmbeddingPipeline:
         self.state_file = Path(data_dir) / "processed_ids.json"
         self.processed_ids = self._load_state()
 
+        # The local state file only says what was processed previously; it is
+        # not proof that those points still exist in Qdrant.  A recreated or
+        # cleared collection would otherwise make the next run skip every
+        # chunk and leave retrieval permanently empty.
+        if self.vector_store is not None and self.processed_ids:
+            try:
+                point_count = self.vector_store.collection_info().get("points_count", 0)
+                if point_count == 0:
+                    logger.warning(
+                        "Qdrant collection is empty but processed_ids.json contains %s IDs; "
+                        "reprocessing all chunks.", len(self.processed_ids)
+                    )
+                    self.processed_ids = set()
+            except Exception as e:
+                logger.warning("Could not reconcile embedding state with Qdrant: %s", e)
+
         if self.vector_store is None:
             logger.warning(
                 "No QdrantStore provided – pipeline will run in DRY-RUN mode "

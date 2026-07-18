@@ -12,6 +12,7 @@ class SectionChunker:
         self.tokenizer = tiktoken.get_encoding(config.ENCODING_NAME)
         self.id_generator = id_generator
         self.page_mapper = page_mapper
+        self.document = id_generator.document
         
     def _count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text))
@@ -92,7 +93,7 @@ class SectionChunker:
             
             chunk = Chunk(
                 chunk_id=chunk_id,
-                document="budget_speech",
+                document=self.document,
                 year=2026,
                 section=section,
                 subsection=subsection,

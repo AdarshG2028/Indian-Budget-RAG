@@ -2,7 +2,7 @@
 Abstract retriever interface and dense retrieval implementation.
 """
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import logging
 import time
 
@@ -10,6 +10,13 @@ from .models import RetrievalResult, RetrievalConfig, RetrievalContext, Retrieva
 from .vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+
+
+try:
+    from src.observability import get_telemetry
+except ImportError:
+    from observability import get_telemetry
+telemetry = get_telemetry()
 
 
 class BaseRetriever(ABC):
@@ -146,6 +153,19 @@ class DenseRetriever(BaseRetriever):
         
         start_time = time.time()
         
+        # Start Dense Retrieval span
+        retrieval_span = None
+        if telemetry:
+            retrieval_span = telemetry.start_span(
+                "retrieval.dense",
+                attributes={
+                    "retrieval.query_length": len(query),
+                    "retrieval.top_k": config.top_k,
+                    "retrieval.collection": self.collection_name
+                }
+            )
+            telemetry.record_event("retrieval.started")
+        
         try:
             # Pipeline hook: Query preprocessing
             if self.query_preprocessor:
@@ -153,21 +173,78 @@ class DenseRetriever(BaseRetriever):
                 logger.debug("Query preprocessed")
             
             # Step 1: Embed the query
+            embed_span = None
+            if telemetry:
+                embed_span = telemetry.start_span(
+                    "retrieval.embed_query",
+                    attributes={
+                        "embedding.model": getattr(self.embedder, 'model_name', 'unknown'),
+                        "embedding.query_length": len(query)
+                    }
+                )
+                telemetry.record_event("retrieval.embed.started")
+            
             embed_start = time.time()
-            query_vector = self.embedder.embed_query(query)
-            embed_time = time.time() - embed_start
-            logger.debug(f"Query embedding took {embed_time:.3f}s")
+            try:
+                query_vector = self.embedder.embed_query(query)
+                embed_time = time.time() - embed_start
+                logger.debug(f"Query embedding took {embed_time:.3f}s")
+                
+                if telemetry:
+                    telemetry.set_span_attribute(embed_span, "embedding.latency", embed_time)
+                    telemetry.record_event("retrieval.embed.completed", {
+                        "embedding.latency": embed_time
+                    })
+            except Exception as e:
+                logger.error(f"Query embedding failed: {e}")
+                if telemetry:
+                    telemetry.record_exception(e, embed_span)
+                    telemetry.record_event("retrieval.embed.failed")
+                raise
+            finally:
+                if telemetry and embed_span:
+                    telemetry.end_span(embed_span)
             
             # Step 2: Perform dense search
+            search_span = None
+            if telemetry:
+                search_span = telemetry.start_span(
+                    "retrieval.vector_search",
+                    attributes={
+                        "search.collection": self.collection_name,
+                        "search.top_k": config.top_k,
+                        "search.score_threshold": config.score_threshold or 0.0
+                    }
+                )
+                telemetry.record_event("retrieval.search.started")
+            
             search_start = time.time()
-            results = self.vector_store.search_dense(
-                query_vector=query_vector,
-                top_k=config.top_k,
-                filters=config.filters,
-                score_threshold=config.score_threshold
-            )
-            search_time = time.time() - search_start
-            logger.debug(f"Vector search took {search_time:.3f}s")
+            try:
+                results = self.vector_store.search_dense(
+                    query_vector=query_vector,
+                    top_k=config.top_k,
+                    filters=config.filters,
+                    score_threshold=config.score_threshold
+                )
+                search_time = time.time() - search_start
+                logger.debug(f"Vector search took {search_time:.3f}s")
+                
+                if telemetry:
+                    telemetry.set_span_attribute(search_span, "search.latency", search_time)
+                    telemetry.set_span_attribute(search_span, "search.results_count", len(results))
+                    telemetry.record_event("retrieval.search.completed", {
+                        "search.latency": search_time,
+                        "search.results_count": len(results)
+                    })
+            except Exception as e:
+                logger.error(f"Vector search failed: {e}")
+                if telemetry:
+                    telemetry.record_exception(e, search_span)
+                    telemetry.record_event("retrieval.search.failed")
+                raise
+            finally:
+                if telemetry and search_span:
+                    telemetry.end_span(search_span)
             
             # Pipeline hook: Reranking
             if self.reranker:
@@ -215,8 +292,24 @@ class DenseRetriever(BaseRetriever):
                 f"retrieved {len(results)} chunks"
             )
             
+            if telemetry:
+                telemetry.set_span_attribute(retrieval_span, "retrieval.latency", total_time)
+                telemetry.set_span_attribute(retrieval_span, "retrieval.chunks_returned", len(results))
+                telemetry.set_span_attribute(retrieval_span, "retrieval.avg_similarity", metrics.avg_similarity)
+                telemetry.record_event("retrieval.completed", {
+                    "retrieval.latency": total_time,
+                    "retrieval.chunks_returned": len(results),
+                    "retrieval.avg_similarity": metrics.avg_similarity
+                })
+            
             return context
             
         except Exception as e:
             logger.error(f"Retrieval failed: {e}")
+            if telemetry:
+                telemetry.record_exception(e, retrieval_span)
+                telemetry.record_event("retrieval.failed")
             raise
+        finally:
+            if telemetry and retrieval_span:
+                telemetry.end_span(retrieval_span)

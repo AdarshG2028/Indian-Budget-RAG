@@ -55,7 +55,7 @@ def test_format_text_for_embedding():
     assert "This is the actual chunk text." in formatted_text
     
     # Check that they are joined by newlines correctly
-    expected = "Budget Speech\nPart A\nTourism\n\nThis is the actual chunk text."
+    expected = "Document Type: Budget Speech\nBudget Speech\nPart A\nTourism\n\nThis is the actual chunk text."
     assert formatted_text == expected
 
 def test_generate_deterministic_uuid():

@@ -61,9 +61,9 @@ class Settings(BaseSettings):
     enable_reranking: bool = False
     reranker_model: str = "ms-marco-MiniLM-L-6-v2"
     reranker_device: str = "cpu"
-    retrieve_top_k: int = 20
+    retrieve_top_k: int = 50
     rerank_top_k: int = 20
-    return_top_k: int = 5
+    return_top_k: int = 10
     
     # RAG Pipeline
     context_max_tokens: int = 4000

@@ -28,6 +28,23 @@ class TelemetryManager:
         self._logger = None
         self._initialized = False
         self._metrics = {}
+        self._uninitialized_warned = False
+
+    def _skip_uninitialized(self, what: str) -> None:
+        """Log the not-initialized notice once, then stay quiet.
+
+        Business modules call into telemetry on every request; outside the
+        FastAPI lifespan (tests, CLIs, scripts) that would otherwise flood
+        the logs with an identical warning per span/event.
+        """
+        if not self._uninitialized_warned:
+            logger.warning(
+                f"Telemetry not initialized, skipping {what} "
+                "(further telemetry skips will be logged at DEBUG level)"
+            )
+            self._uninitialized_warned = True
+        else:
+            logger.debug(f"Telemetry not initialized, skipping {what}")
         
     def initialize(self, tracer, meter, logger_provider=None):
         """
@@ -48,15 +65,100 @@ class TelemetryManager:
         """Check if telemetry manager is initialized."""
         return self._initialized
     
-    @contextmanager
     def start_span(
+        self,
+        name: str,
+        attributes: Optional[Dict[str, Any]] = None,
+        kind: str = "internal"
+    ):
+        """
+        Start a new span and return the span object for manual management.
+        
+        Args:
+            name: Span name
+            attributes: Span attributes
+            kind: Span kind (internal, server, client, producer, consumer)
+            
+        Returns:
+            Span object for manual management (must call end_span)
+        """
+        if not self._initialized:
+            self._skip_uninitialized(f"span: {name}")
+            return None
+
+        try:
+            from opentelemetry import trace
+
+            # Map kind string to SpanKind
+            kind_map = {
+                "internal": trace.SpanKind.INTERNAL,
+                "server": trace.SpanKind.SERVER,
+                "client": trace.SpanKind.CLIENT,
+                "producer": trace.SpanKind.PRODUCER,
+                "consumer": trace.SpanKind.CONSUMER
+            }
+            span_kind = kind_map.get(kind, trace.SpanKind.INTERNAL)
+
+            span = self._tracer.start_span(name, kind=span_kind)
+            if attributes:
+                span.set_attributes(attributes)
+
+            # Make span the current span
+            token = trace.use_span(span, end_on_exit=False)
+            token.__enter__()
+
+            # Store token for cleanup
+            span._token = token
+
+            return span
+            
+        except Exception as e:
+            logger.error(f"Error starting span {name}: {e}")
+            return None
+    
+    def end_span(self, span):
+        """
+        End a manually managed span.
+        
+        Args:
+            span: Span object to end
+        """
+        if not span:
+            return
+            
+        try:
+            if hasattr(span, '_token'):
+                span._token.__exit__(None, None, None)
+            span.end()
+        except Exception as e:
+            logger.error(f"Error ending span: {e}")
+    
+    def set_span_attribute(self, span, key: str, value):
+        """
+        Set an attribute on a span.
+        
+        Args:
+            span: Span object
+            key: Attribute key
+            value: Attribute value
+        """
+        if not span:
+            return
+            
+        try:
+            span.set_attribute(key, value)
+        except Exception as e:
+            logger.error(f"Error setting span attribute {key}: {e}")
+    
+    @contextmanager
+    def start_span_context(
         self,
         name: str,
         attributes: Optional[Dict[str, Any]] = None,
         kind: str = "internal"
     ) -> ContextManager:
         """
-        Start a new span with context manager.
+        Start a new span with context manager for automatic cleanup.
         
         Args:
             name: Span name
@@ -67,7 +169,7 @@ class TelemetryManager:
             Span object for adding events and attributes
         """
         if not self._initialized:
-            logger.warning(f"Telemetry not initialized, skipping span: {name}")
+            self._skip_uninitialized(f"span: {name}")
             yield None
             return
             
@@ -119,7 +221,7 @@ class TelemetryManager:
             attributes: Event attributes
         """
         if not self._initialized:
-            logger.warning(f"Telemetry not initialized, skipping event: {name}")
+            self._skip_uninitialized(f"event: {name}")
             return
             
         try:
@@ -134,31 +236,33 @@ class TelemetryManager:
     def record_exception(
         self,
         exception: Exception,
+        span=None,
         attributes: Optional[Dict[str, Any]] = None
     ):
         """
-        Record an exception on the current span.
-        
+        Record an exception on a span.
+
         Args:
             exception: Exception to record
+            span: Span to record onto; falls back to the current span
             attributes: Additional attributes
         """
         if not self._initialized:
-            logger.warning(f"Telemetry not initialized, skipping exception recording")
+            self._skip_uninitialized("exception recording")
             return
-            
+
         try:
             from opentelemetry import trace
             from opentelemetry.trace import Status, StatusCode
-            
-            current_span = trace.get_current_span()
-            
-            if current_span and current_span.is_recording():
-                current_span.record_exception(exception)
-                current_span.set_status(Status(StatusCode.ERROR, str(exception)))
-                
+
+            target_span = span if span is not None else trace.get_current_span()
+
+            if target_span and target_span.is_recording():
+                target_span.record_exception(exception)
+                target_span.set_status(Status(StatusCode.ERROR, str(exception)))
+
                 if attributes:
-                    current_span.set_attributes(attributes)
+                    target_span.set_attributes(attributes)
         except Exception as e:
             logger.error(f"Error recording exception: {e}")
     
@@ -251,26 +355,6 @@ class TelemetryManager:
                 )
         except Exception as e:
             logger.error(f"Error recording gauge {name}: {e}")
-    
-    def set_span_attribute(self, key: str, value: Any):
-        """
-        Set an attribute on the current span.
-        
-        Args:
-            key: Attribute key
-            value: Attribute value
-        """
-        if not self._initialized:
-            return
-            
-        try:
-            from opentelemetry import trace
-            current_span = trace.get_current_span()
-            
-            if current_span and current_span.is_recording():
-                current_span.set_attribute(key, value)
-        except Exception as e:
-            logger.error(f"Error setting span attribute {key}: {e}")
     
     def get_trace_id(self) -> Optional[str]:
         """

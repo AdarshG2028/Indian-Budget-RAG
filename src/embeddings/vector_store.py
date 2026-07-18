@@ -189,7 +189,7 @@ class QdrantStore:
         info = self.client.get_collection(self.collection_name)
         return {
             "collection_name": self.collection_name,
-            "vectors_count": info.vectors_count,
-            "points_count": info.points_count,
+            "vectors_count": getattr(info, "indexed_vectors_count", None),
+            "points_count": getattr(info, "points_count", 0),
             "status": info.status,
         }

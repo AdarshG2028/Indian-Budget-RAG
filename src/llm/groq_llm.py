@@ -10,6 +10,12 @@ from .models import LLMConfig, LLMResponse, LLMStreamChunk
 
 logger = logging.getLogger(__name__)
 
+try:
+    from src.observability import get_telemetry
+except ImportError:
+    from observability import get_telemetry
+telemetry = get_telemetry()
+
 
 class GroqLLM(BaseLLM):
     """
@@ -56,6 +62,22 @@ class GroqLLM(BaseLLM):
         """
         start_time = time.time()
         
+        # Start LLM API call span
+        llm_api_span = None
+        if telemetry:
+            llm_api_span = telemetry.start_span(
+                "llm.groq_api_call",
+                attributes={
+                    "llm.provider": "groq",
+                    "llm.model": self.config.model_name,
+                    "llm.temperature": self.config.temperature,
+                    "llm.max_tokens": self.config.max_tokens,
+                    "llm.prompt_length": len(prompt),
+                    "llm.streaming": False
+                }
+            )
+            telemetry.record_event("llm.api_call.started")
+        
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -91,11 +113,31 @@ class GroqLLM(BaseLLM):
                 f"{total_tokens} tokens ({prompt_tokens} prompt, {completion_tokens} completion)"
             )
             
+            if telemetry:
+                telemetry.set_span_attribute(llm_api_span, "llm.latency", latency)
+                telemetry.set_span_attribute(llm_api_span, "llm.prompt_tokens", prompt_tokens)
+                telemetry.set_span_attribute(llm_api_span, "llm.completion_tokens", completion_tokens)
+                telemetry.set_span_attribute(llm_api_span, "llm.total_tokens", total_tokens)
+                telemetry.set_span_attribute(llm_api_span, "llm.finish_reason", finish_reason)
+                telemetry.record_event("llm.api_call.completed", {
+                    "llm.latency": latency,
+                    "llm.prompt_tokens": prompt_tokens,
+                    "llm.completion_tokens": completion_tokens,
+                    "llm.total_tokens": total_tokens,
+                    "llm.finish_reason": finish_reason
+                })
+            
             return llm_response
             
         except Exception as e:
             logger.error(f"Groq generation failed: {e}")
+            if telemetry:
+                telemetry.record_exception(e, llm_api_span)
+                telemetry.record_event("llm.api_call.failed")
             raise
+        finally:
+            if telemetry and llm_api_span:
+                telemetry.end_span(llm_api_span)
     
     def stream(self, prompt: str) -> Iterator[LLMStreamChunk]:
         """
@@ -107,6 +149,26 @@ class GroqLLM(BaseLLM):
         Yields:
             LLMStreamChunk objects with incremental text
         """
+        start_time = time.time()
+        first_token_time = None
+        token_count = 0
+        
+        # Start LLM streaming span
+        llm_stream_span = None
+        if telemetry:
+            llm_stream_span = telemetry.start_span(
+                "llm.groq_streaming",
+                attributes={
+                    "llm.provider": "groq",
+                    "llm.model": self.config.model_name,
+                    "llm.temperature": self.config.temperature,
+                    "llm.max_tokens": self.config.max_tokens,
+                    "llm.prompt_length": len(prompt),
+                    "llm.streaming": True
+                }
+            )
+            telemetry.record_event("llm.streaming.started")
+        
         try:
             stream = self.client.chat.completions.create(
                 model=self.config.model_name,
@@ -122,7 +184,18 @@ class GroqLLM(BaseLLM):
             
             for chunk in stream:
                 delta = chunk.choices[0].delta.content or ""
-                full_text += delta
+                
+                # Track first token latency
+                if delta and first_token_time is None:
+                    first_token_time = time.time() - start_time
+                    if telemetry:
+                        telemetry.record_event("llm.streaming.first_token", {
+                            "llm.first_token_latency": first_token_time
+                        })
+                
+                if delta:
+                    token_count += 1
+                    full_text += delta
                 
                 yield LLMStreamChunk(
                     text=full_text,
@@ -132,11 +205,30 @@ class GroqLLM(BaseLLM):
                 )
                 
                 if chunk.choices[0].finish_reason:
+                    total_time = time.time() - start_time
+                    if telemetry:
+                        telemetry.record_event("llm.streaming.completed", {
+                            "llm.total_latency": total_time,
+                            "llm.first_token_latency": first_token_time or 0,
+                            "llm.tokens_streamed": token_count,
+                            "llm.tokens_per_second": token_count / total_time if total_time > 0 else 0
+                        })
                     break
                     
         except Exception as e:
             logger.error(f"Groq streaming failed: {e}")
+            if telemetry:
+                telemetry.record_exception(e, llm_stream_span)
+                telemetry.record_event("llm.streaming.failed")
             raise
+        finally:
+            if telemetry and llm_stream_span:
+                total_time = time.time() - start_time
+                telemetry.set_span_attribute(llm_stream_span, "llm.total_latency", total_time)
+                telemetry.set_span_attribute(llm_stream_span, "llm.first_token_latency", first_token_time or 0)
+                telemetry.set_span_attribute(llm_stream_span, "llm.tokens_streamed", token_count)
+                telemetry.set_span_attribute(llm_stream_span, "llm.tokens_per_second", token_count / total_time if total_time > 0 else 0)
+                telemetry.end_span(llm_stream_span)
     
     def validate_config(self) -> bool:
         """

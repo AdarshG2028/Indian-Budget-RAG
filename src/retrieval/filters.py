@@ -122,6 +122,7 @@ class FilterConverter:
             raise ImportError("qdrant-client is required")
         
         qdrant_conditions = []
+        must_not_conditions = []
         
         for condition in conditions:
             field = condition.field
@@ -133,11 +134,9 @@ class FilterConverter:
                     rest.FieldCondition(key=field, match=rest.MatchValue(value=value))
                 )
             elif operator == FilterOperator.NE:
-                qdrant_conditions.append(
+                must_not_conditions.append(
                     rest.FieldCondition(key=field, match=rest.MatchValue(value=value))
                 )
-                # Note: Qdrant doesn't have direct NE, would need to use must_not
-                # For now, we'll skip NE as it requires more complex filter structure
             elif operator == FilterOperator.GT:
                 qdrant_conditions.append(
                     rest.FieldCondition(key=field, range=rest.Range(gt=value))
@@ -159,27 +158,27 @@ class FilterConverter:
                     rest.FieldCondition(key=field, match=rest.MatchAny(any=value))
                 )
             elif operator == FilterOperator.NIN:
-                qdrant_conditions.append(
+                must_not_conditions.append(
                     rest.FieldCondition(key=field, match=rest.MatchAny(any=value))
                 )
-                # Note: NIN requires must_not, similar to NE
             elif operator == FilterOperator.CONTAINS:
                 qdrant_conditions.append(
                     rest.FieldCondition(key=field, match=rest.MatchText(text=value))
                 )
             elif operator == FilterOperator.STARTS_WITH:
-                # Qdrant doesn't have direct starts_with, use match with prefix
                 if isinstance(value, str):
                     qdrant_conditions.append(
                         rest.FieldCondition(key=field, match=rest.MatchText(text=value))
                     )
             elif operator == FilterOperator.ENDS_WITH:
-                # Qdrant doesn't have direct ends_with, use match with suffix
                 if isinstance(value, str):
                     qdrant_conditions.append(
                         rest.FieldCondition(key=field, match=rest.MatchText(text=value))
                     )
         
-        if qdrant_conditions:
-            return rest.Filter(must=qdrant_conditions)
+        if qdrant_conditions or must_not_conditions:
+            return rest.Filter(
+                must=qdrant_conditions if qdrant_conditions else None,
+                must_not=must_not_conditions if must_not_conditions else None
+            )
         return None

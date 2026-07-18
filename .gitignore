@@ -3,6 +3,8 @@
 __pycache__/
 .pytest_cache/
 
+traces/
+
 data/raw/
 data/processed/
 data/vector_store/

@@ -7,6 +7,13 @@ import sys
 import os
 from pathlib import Path
 
+# Budget figures include non-ASCII characters (e.g. ₹) that Windows' default
+# console codec (cp1252/charmap) cannot encode, crashing print() after a
+# successful pipeline run.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
