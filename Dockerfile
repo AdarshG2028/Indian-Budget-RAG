@@ -17,9 +17,9 @@ COPY pyproject.toml uv.lock ./
 RUN pip install uv
 RUN uv sync --frozen --no-dev
 
-# Copy application code
+# Copy application code (retrieval goes through Qdrant, not local files —
+# data/ is ingestion-time only and isn't needed at runtime)
 COPY src/ ./src/
-COPY data/ ./data/
 
 # Create necessary directories
 RUN mkdir -p evaluation/reports evaluation/experiments

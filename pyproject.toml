@@ -10,6 +10,7 @@ dependencies = [
     "pymupdf4llm>=0.0.4",
     "tiktoken>=0.7.0",
     "sentence-transformers>=5.6.0",
+    "torch>=2.0.0",
     "qdrant-client>=1.18.0",
     "python-dotenv>=1.2.2",
     "groq>=1.5.0",
@@ -34,3 +35,18 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+# Redirect torch to the CPU-only wheel index on Linux (where the container
+# builds run). The default PyPI linux wheel for torch depends on the full
+# nvidia-* CUDA stack (~2.5GB) even though this app only does CPU inference
+# (EMBEDDING_DEVICE=cpu / RERANKER_DEVICE=cpu). Windows/macOS wheels don't
+# carry that dependency, so they're left on the default index.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
