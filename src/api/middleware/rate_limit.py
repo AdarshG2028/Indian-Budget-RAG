@@ -164,6 +164,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         Returns:
             Response, or a 429 error response if the limit is exceeded
         """
+        # CORS preflight requests aren't real API calls — every cross-origin
+        # POST triggers one, and rate-limiting them (this middleware sits
+        # outside CORSMiddleware, so a 429 here skips CORS headers entirely)
+        # makes the browser report a CORS failure instead of the real 429.
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         rule = self._resolve_rule(request.url.path)
         if rule is None:
             return await call_next(request)
