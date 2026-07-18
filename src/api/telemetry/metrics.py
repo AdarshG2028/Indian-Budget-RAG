@@ -15,6 +15,8 @@ class MetricNames:
     # Counter metrics
     HTTP_REQUESTS = "http.requests.total"
     HTTP_ERRORS = "http.requests.errors"
+    RATE_LIMIT_ALLOWED = "http.rate_limit.allowed"
+    RATE_LIMIT_BLOCKED = "http.rate_limit.blocked"
     STREAMED_RESPONSES = "rag.responses.streamed"
     RETRIEVAL_REQUESTS = "rag.retrieval.requests"
     RETRIEVAL_FAILURES = "rag.retrieval.failures"
@@ -28,6 +30,10 @@ class MetricNames:
     
     # Histogram metrics
     HTTP_REQUEST_LATENCY = "http.request.duration"
+    # Gauge-like: sampled per request (TelemetryManager's observable
+    # gauge cannot be updated after creation, so a histogram is used;
+    # read the latest bucket value or max in dashboards)
+    RATE_LIMIT_TRACKED_CLIENTS = "http.rate_limit.tracked_clients"
     EMBEDDING_LATENCY = "rag.retrieval.embedding.duration"
     RETRIEVAL_LATENCY = "rag.retrieval.duration"
     RERANKING_LATENCY = "rag.reranking.duration"

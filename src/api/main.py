@@ -13,7 +13,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .middleware import RequestIDMiddleware, LoggingMiddleware, ErrorHandlerMiddleware
+from .middleware import (
+    RequestIDMiddleware,
+    LoggingMiddleware,
+    ErrorHandlerMiddleware,
+    RateLimitMiddleware
+)
 from .routers import health_router, rag_router, retrieval_router, evaluation_router
 from .telemetry import configure_telemetry
 from .telemetry.config import shutdown_telemetry
@@ -70,7 +75,24 @@ app.add_middleware(
     allow_headers=settings.cors_allow_headers,
 )
 
-# Add custom middleware
+# Add custom middleware (added first = runs closest to the route, so
+# rate-limited 429s still get request IDs and logging)
+if settings.rate_limit_enabled:
+    # Config paths are relative to api_prefix; compose full prefixes here
+    app.add_middleware(
+        RateLimitMiddleware,
+        max_requests=settings.rate_limit_max_requests,
+        window_seconds=settings.rate_limit_window_seconds,
+        limited_path_prefixes=tuple(
+            f"{settings.api_prefix}{path}" for path in settings.rate_limit_paths
+        ),
+        rules={
+            f"{settings.api_prefix}{path}": rule
+            for path, rule in settings.rate_limit_rules.items()
+        },
+        trust_forwarded_for=settings.rate_limit_trust_forwarded_for,
+        api_key_header=settings.api_key_header
+    )
 app.add_middleware(ErrorHandlerMiddleware)
 app.add_middleware(LoggingMiddleware)
 app.add_middleware(RequestIDMiddleware)

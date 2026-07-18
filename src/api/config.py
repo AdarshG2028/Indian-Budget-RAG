@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     api_key_header: str = "X-API-Key"
     api_keys: list[str] = []
     
+    # Rate Limiting (protects Groq API quota/cost on /rag endpoints).
+    # Paths are relative to api_prefix. rate_limit_rules maps a path
+    # prefix to a per-endpoint override, e.g. from the environment:
+    # RATE_LIMIT_RULES='{"/rag/query/stream": {"requests": 5, "window": 60}}'
+    rate_limit_enabled: bool = True
+    rate_limit_max_requests: int = 10
+    rate_limit_window_seconds: int = 60
+    rate_limit_paths: list[str] = ["/rag/"]
+    rate_limit_rules: dict[str, dict[str, int]] = {}
+    # Enable ONLY behind a trusted reverse proxy that sets X-Forwarded-For
+    rate_limit_trust_forwarded_for: bool = False
+
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: Optional[str] = None
