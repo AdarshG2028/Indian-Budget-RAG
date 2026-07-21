@@ -181,7 +181,9 @@ class QdrantVectorStore(VectorStore):
         info = self.client.get_collection(self.collection_name)
         return {
             "collection_name": self.collection_name,
-            "vectors_count": info.vectors_count,
+            # qdrant-client renamed this field to indexed_vectors_count; getattr
+            # keeps this working across client versions that may lack it.
+            "vectors_count": getattr(info, "indexed_vectors_count", None),
             "points_count": info.points_count,
             "status": info.status,
         }

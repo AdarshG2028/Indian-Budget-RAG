@@ -27,5 +27,9 @@ class Chunk:
     token_count: int
     char_count: int
     text: str
+    # Full heading hierarchy for this chunk. Carried into the embedded text and
+    # the Qdrant payload; section/subsection above are the first two entries,
+    # kept for backwards-compatible filtering.
+    heading_path: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
     entities: EntityExtraction = field(default_factory=EntityExtraction)

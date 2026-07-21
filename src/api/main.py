@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
+from .dependencies import get_embedder, get_vector_store, get_llm
 from .middleware import (
     RequestIDMiddleware,
     LoggingMiddleware,
@@ -46,7 +47,32 @@ async def lifespan(app: FastAPI):
     # Configure OpenTelemetry
     environment = "development" if settings.debug else "production"
     configure_telemetry(app=app, environment=environment)
-    
+
+    # Warm dependencies at boot rather than on the first request. Without
+    # this, get_embedder()/get_vector_store()/get_llm() (lazy singletons in
+    # dependencies.py) construct on whichever request happens to need them
+    # first — on a platform that sleeps the container (e.g. HF Spaces free
+    # tier), that means the first user after every wake-up pays for model
+    # loading synchronously, and a bad Qdrant URL or missing Groq key surfaces
+    # as a random user's 500 instead of a boot-time log.
+    #
+    # The embedder failing is fatal (no model, no service), so it's allowed
+    # to raise and stop startup. Qdrant/Groq failures are logged loudly but
+    # don't abort boot: a transient blip in either shouldn't take the whole
+    # Space down when it might recover before real traffic arrives.
+    logger.info("Warming dependencies...")
+    get_embedder()
+    try:
+        get_vector_store().collection_info()
+        logger.info("Qdrant connectivity verified.")
+    except Exception:
+        logger.exception("Qdrant connectivity check failed at startup — retrieval will fail until this recovers.")
+    try:
+        get_llm()
+    except Exception:
+        logger.exception("Groq LLM client failed to initialize at startup — generation will fail until this recovers.")
+    logger.info("Dependency warm-up complete.")
+
     yield
     
     # Shutdown

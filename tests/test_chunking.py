@@ -43,25 +43,85 @@ def test_chunk_id_generator():
     assert gen.generate(["Part A"]) == "budget_2026_part_a_002"
     assert gen.generate(["PART B", "Indirect Taxes"]) == "budget_2026_part_b_indirect_taxes_001"
 
-def test_table_splitting():
-    gen = ChunkIdGenerator("budget", 2026)
-    mapper = PageMapper("text\n2")
-    chunker = TableChunker(gen, mapper)
-    
-    # We will patch max chunk size to force split for test
+@pytest.fixture
+def patch_max_chunk_size():
+    """Temporarily shrink the chunk budget to force splitting in tests."""
     from chunking import config
-    original_max = config.config.MAX_CHUNK_SIZE
-    config.config.MAX_CHUNK_SIZE = 10 # very small, forcing split
-    
-    table_content = "| Col 1 | Col 2 |\n|---|---|\n| a | b |\n| c | d |"
-    tables = [{"content": table_content, "start_line": 0, "end_line": 3, "heading_hierarchy": ["Table Test"]}]
-    
+    original = config.config.MAX_CHUNK_SIZE
+
+    def _apply(value):
+        config.config.MAX_CHUNK_SIZE = value
+        return value
+
+    yield _apply
+    config.config.MAX_CHUNK_SIZE = original
+
+
+def _make_chunker():
+    # Built after the budget is patched: max_tokens is resolved in __init__.
+    return TableChunker(ChunkIdGenerator("budget", 2026), PageMapper("text\n2"))
+
+
+def test_table_splitting_repeats_header(patch_max_chunk_size):
+    """A split table keeps its header on every part, so each chunk stands alone."""
+    patch_max_chunk_size(40)
+    chunker = _make_chunker()
+
+    rows = "\n".join(f"| r{i} | v{i} |" for i in range(6))
+    table_content = f"| Col 1 | Col 2 |\n|---|---|\n{rows}"
+    tables = [{"content": table_content, "start_line": 0, "end_line": 7,
+               "heading_hierarchy": ["Table Test"]}]
+
     chunks = chunker.chunk_tables(tables)
-    
-    assert len(chunks) == 2
-    assert "Col 1" in chunks[0].text
-    assert "a | b" in chunks[0].text
-    assert "Col 1" in chunks[1].text
-    assert "c | d" in chunks[1].text
-    
-    config.config.MAX_CHUNK_SIZE = original_max
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert "Col 1" in chunk.text
+        assert chunker._count_tokens(chunk.text) <= chunker.max_tokens
+    # No data row is dropped by the split
+    combined = " ".join(c.text for c in chunks)
+    for i in range(6):
+        assert f"r{i}" in combined
+
+
+def test_table_splitting_drops_oversized_header(patch_max_chunk_size):
+    """
+    When the header alone would consume most of the budget, it is not repeated.
+
+    Budget documents contain tables whose header row runs to hundreds of
+    tokens; repeating those leaves no room for data and produces parts that
+    overflow the embedding window regardless.
+    """
+    patch_max_chunk_size(30)
+    chunker = _make_chunker()
+
+    wide_header = "| " + " | ".join(f"LongColumnName{i}" for i in range(10)) + " |"
+    table_content = f"{wide_header}\n|---|---|\n| a | b |\n| c | d |"
+    tables = [{"content": table_content, "start_line": 0, "end_line": 3,
+               "heading_hierarchy": ["Table Test"]}]
+
+    chunks = chunker.chunk_tables(tables)
+
+    assert len(chunks) >= 1
+    for chunk in chunks:
+        assert chunker._count_tokens(chunk.text) <= chunker.max_tokens
+
+
+def test_chunks_never_exceed_embedding_window(patch_max_chunk_size):
+    """
+    The invariant the chunker exists to guarantee: nothing the embedder sees
+    is over its window, even for content with no natural split points.
+    """
+    patch_max_chunk_size(50)
+    chunker = _make_chunker()
+
+    # A single "word" of <br>-joined figures: no spaces, no pipes to split on.
+    unsplittable = "| " + "<br>".join(str(i * 1.5) for i in range(200)) + " |"
+    tables = [{"content": f"| A | B |\n|---|---|\n{unsplittable}",
+               "start_line": 0, "end_line": 2, "heading_hierarchy": ["Wide"]}]
+
+    chunks = chunker.chunk_tables(tables)
+
+    assert chunks
+    for chunk in chunks:
+        assert chunker._count_tokens(chunk.text) <= chunker.max_tokens
