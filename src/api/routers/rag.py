@@ -66,7 +66,7 @@ async def query(
                     section=c.get("section", ""),
                     page_start=c.get("page_start", 0),
                     page_end=c.get("page_end", 0),
-                    similarity=c.get("similarity", 0.0)
+                    similarity=c.get("score", 0.0)
                 )
                 for c in result["citations"]
             ]

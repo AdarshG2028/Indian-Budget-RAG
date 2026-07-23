@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     
     # LLM
     llm_model: str = "llama-3.3-70b-versatile"
-    llm_temperature: float = 0.7
+    llm_temperature: float = 0.1
     llm_max_tokens: int = 1024
     groq_api_key: Optional[str] = None
     
